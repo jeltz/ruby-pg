@@ -7,7 +7,7 @@
 #include "pg.h"
 
 VALUE rb_cPGresult;
-static VALUE sym_symbol, sym_string, sym_static_symbol;
+static VALUE sym_symbol, sym_string;
 
 static VALUE pgresult_type_map_set( VALUE, VALUE );
 static t_pg_result *pgresult_get_this( VALUE );
@@ -315,17 +315,17 @@ pg_result_check( VALUE self )
 		case PGRES_SINGLE_TUPLE:
 		case PGRES_EMPTY_QUERY:
 		case PGRES_COMMAND_OK:
-#ifdef HAVE_PQENTERPIPELINEMODE
+#ifdef LIBPQ_HAS_PIPELINING
 		case PGRES_PIPELINE_SYNC:
 #endif
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 		case PGRES_TUPLES_CHUNK:
 #endif
 			return self;
 		case PGRES_BAD_RESPONSE:
 		case PGRES_FATAL_ERROR:
 		case PGRES_NONFATAL_ERROR:
-#ifdef HAVE_PQENTERPIPELINEMODE
+#ifdef LIBPQ_HAS_PIPELINING
 		case PGRES_PIPELINE_ABORTED:
 #endif
 			error = rb_str_new2( PQresultErrorMessage(this->pgresult) );
@@ -465,9 +465,6 @@ pgresult_get(VALUE self)
 static VALUE pg_cstr_to_sym(char *cstr, unsigned int flags, int enc_idx)
 {
 	VALUE fname;
-#ifdef TRUFFLERUBY
-	if( flags & (PG_RESULT_FIELD_NAMES_SYMBOL | PG_RESULT_FIELD_NAMES_STATIC_SYMBOL) ){
-#else
 	if( flags & PG_RESULT_FIELD_NAMES_SYMBOL ){
 		rb_encoding *enc = rb_enc_from_index(enc_idx);
 		fname = rb_check_symbol_cstr(cstr, strlen(cstr), enc);
@@ -476,10 +473,6 @@ static VALUE pg_cstr_to_sym(char *cstr, unsigned int flags, int enc_idx)
 			PG_ENCODING_SET_NOCHECK(fname, enc_idx);
 			fname = rb_str_intern(fname);
 		}
-	} else if( flags & PG_RESULT_FIELD_NAMES_STATIC_SYMBOL ){
-#endif
-		rb_encoding *enc = rb_enc_from_index(enc_idx);
-		fname = ID2SYM(rb_intern3(cstr, strlen(cstr), enc));
 	} else {
 		fname = rb_str_new2(cstr);
 		PG_ENCODING_SET_NOCHECK(fname, enc_idx);
@@ -531,6 +524,7 @@ static void pgresult_init_fnames(VALUE self)
  *    res.column_values(1) # ["2"]
  *    res.each.first       # {"a" => "1", "b" => "2", "c" => nil}
  *    res.each_row.first   # ["1", "2", nil]
+ *    res.each_tuple.first # #<PG::Tuple a: "1", b: "2", c: nil>
  *
  * Whenever a value is accessed it is casted to a Ruby object by the assigned #type_map which is PG::TypeMapAllStrings by default.
  * Similarly field names can be retrieved either as strings (default) or as symbols which can be switched per #field_name_type= .
@@ -549,6 +543,7 @@ static void pgresult_init_fnames(VALUE self)
  *    res.column_values(1) # [2]
  *    res.each.first       # {a: 1, b: 2, c: nil}
  *    res.each_row.first   # [1, 2, nil]
+ *    res.each_tuple.first # #<PG::Tuple a: 1, b: 2, c: nil>
  *
  * Since pg-1.1 the amount of memory in use by a PG::Result object is estimated and passed to ruby's garbage collector.
  * You can invoke the #clear method to force deallocation of memory of the instance when finished with the result for better memory performance.
@@ -1432,6 +1427,32 @@ pgresult_each(VALUE self)
 
 /*
  * call-seq:
+ *    res.each_tuple{ |tuple| ... }
+ *
+ * Yields a PG::Tuple object for each row in the result.
+ *
+ *    res = conn.exec('SELECT 1 AS a, 2 AS b, NULL AS c')
+ *    res.each_tuple.first  # #<PG::Tuple a: "1", b: "2", c: nil>
+ */
+static VALUE
+pgresult_each_tuple(VALUE self)
+{
+	PGresult *result;
+	int tuple_num;
+
+	RETURN_SIZED_ENUMERATOR(self, 0, NULL, pgresult_ntuples_for_enum);
+
+	result = pgresult_get(self);
+
+	for(tuple_num = 0; tuple_num < PQntuples(result); tuple_num++) {
+		VALUE tuple = pgresult_tuple(self, INT2FIX(tuple_num));
+		rb_yield( tuple );
+	}
+	return self;
+}
+
+/*
+ * call-seq:
  *    res.fields() -> Array
  *
  * Depending on #field_name_type= returns an array of strings or symbols representing the names of the fields in the result.
@@ -1579,7 +1600,7 @@ pgresult_stream_any(VALUE self, int (*yielder)(VALUE, int, int, void*), void* da
 					return self;
 				rb_raise( rb_eInvalidResultStatus, "PG::Result is not in single row mode");
 			case PGRES_SINGLE_TUPLE:
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 			case PGRES_TUPLES_CHUNK:
 #endif
 				break;
@@ -1692,7 +1713,6 @@ pgresult_stream_each_tuple(VALUE self)
  * It can be set to one of:
  * * +:string+ to use String based field names
  * * +:symbol+ to use Symbol based field names
- * * +:static_symbol+ to use pinned Symbol (can not be garbage collected) - Don't use this, it will probably be removed in future.
  *
  * The default is retrieved from PG::Connection#field_name_type , which defaults to +:string+ .
  *
@@ -1715,7 +1735,6 @@ pgresult_field_name_type_set(VALUE self, VALUE sym)
 
 	this->flags &= ~PG_RESULT_FIELD_NAMES_MASK;
 	if( sym == sym_symbol ) this->flags |= PG_RESULT_FIELD_NAMES_SYMBOL;
-	else if ( sym == sym_static_symbol ) this->flags |= PG_RESULT_FIELD_NAMES_STATIC_SYMBOL;
 	else if ( sym == sym_string );
 	else rb_raise(rb_eArgError, "invalid argument %+"PRIsVALUE, sym);
 
@@ -1736,8 +1755,6 @@ pgresult_field_name_type_get(VALUE self)
 	t_pg_result *this = pgresult_get_this(self);
 	if( this->flags & PG_RESULT_FIELD_NAMES_SYMBOL ){
 		return sym_symbol;
-	} else if( this->flags & PG_RESULT_FIELD_NAMES_STATIC_SYMBOL ){
-		return sym_static_symbol;
 	} else {
 		return sym_string;
 	}
@@ -1748,7 +1765,6 @@ init_pg_result(void)
 {
 	sym_string = ID2SYM(rb_intern("string"));
 	sym_symbol = ID2SYM(rb_intern("symbol"));
-	sym_static_symbol = ID2SYM(rb_intern("static_symbol"));
 
 	rb_cPGresult = rb_define_class_under( rb_mPG, "Result", rb_cObject );
 	rb_undef_alloc_func(rb_cPGresult);
@@ -1797,6 +1813,7 @@ init_pg_result(void)
 	rb_define_method(rb_cPGresult, "each", pgresult_each, 0);
 	rb_define_method(rb_cPGresult, "fields", pgresult_fields, 0);
 	rb_define_method(rb_cPGresult, "each_row", pgresult_each_row, 0);
+	rb_define_method(rb_cPGresult, "each_tuple", pgresult_each_tuple, 0);
 	rb_define_method(rb_cPGresult, "values", pgresult_values, 0);
 	rb_define_method(rb_cPGresult, "column_values", pgresult_column_values, 1);
 	rb_define_method(rb_cPGresult, "field_values", pgresult_field_values, 1);

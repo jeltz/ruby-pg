@@ -14,7 +14,7 @@ VALUE rb_cPGconn;
 static ID s_id_encode;
 static ID s_id_autoclose_set;
 static VALUE sym_type, sym_format, sym_value;
-static VALUE sym_symbol, sym_string, sym_static_symbol;
+static VALUE sym_symbol, sym_string;
 
 static VALUE pgconn_finish( VALUE );
 static VALUE pgconn_set_default_encoding( VALUE self );
@@ -623,6 +623,22 @@ pgconn_reset_poll(VALUE self)
 	return INT2FIX((int)status);
 }
 
+/*
+ * call-seq:
+ *    conn.pgconn_address()
+ *
+ * Returns the PGconn address.
+ *
+ * It can be used to compare with the address received by the OAuth hook:
+ *
+ *   PG.set_auth_data_hook do |pgconn_address, data|
+ */
+static VALUE
+pgconn_pgconn_address(VALUE self)
+{
+	return PTR2NUM(pg_get_pgconn(self));
+}
+
 
 /*
  * call-seq:
@@ -865,6 +881,31 @@ pgconn_protocol_version(VALUE self)
 	return INT2NUM(protocol_version);
 }
 
+#ifdef LIBPQ_HAS_FULL_PROTOCOL_VERSION
+/*
+ * call-seq:
+ *   conn.full_protocol_version -> Integer
+ *
+ * Interrogates the frontend/backend protocol being used, including minor version.
+ *
+ * Applications might wish to use this function to determine whether certain features are supported.
+ * The result is the major version multiplied by 10000 added to the minor version, e.g. 30002 for version 3.2.
+ * The protocol version will not change after connection startup is complete, but it could theoretically change during a connection reset.
+ * The 3.0 protocol is supported by PostgreSQL server versions 7.4 and above.
+ *
+ * PG::ConnectionBad is raised if the connection is bad.
+ */
+static VALUE
+pgconn_full_protocol_version(VALUE self)
+{
+	int protocol_version = PQfullProtocolVersion(pg_get_pgconn(self));
+	if (protocol_version == 0) {
+		pg_raise_conn_error( rb_eConnectionBad, self, "PQfullProtocolVersion() can't get protocol version");
+	}
+	return INT2NUM(protocol_version);
+}
+#endif
+
 /*
  * call-seq:
  *   conn.server_version -> Integer
@@ -940,6 +981,19 @@ pgconn_socket(VALUE self)
 	return INT2NUM(sd);
 }
 
+#ifdef _WIN32
+#define is_socket(fd) rb_w32_is_socket(fd)
+#else
+static int
+is_socket(int fd)
+{
+    struct stat sbuf;
+
+    if (fstat(fd, &sbuf) < 0)
+        rb_sys_fail("fstat(2)");
+    return S_ISSOCK(sbuf.st_mode);
+}
+#endif
 
 VALUE
 pg_wrap_socket_io(int sd, VALUE self, VALUE *p_socket_io, int *p_ruby_sd)
@@ -958,7 +1012,7 @@ pg_wrap_socket_io(int sd, VALUE self, VALUE *p_socket_io, int *p_ruby_sd)
 		*p_ruby_sd = ruby_sd = sd;
 	#endif
 
-	cSocket = rb_const_get(rb_cObject, rb_intern("BasicSocket"));
+	cSocket = rb_const_get(rb_cObject, rb_intern(is_socket(ruby_sd) ? "BasicSocket" : "IO"));
 	socket_io = rb_funcall( cSocket, rb_intern("for_fd"), 1, INT2NUM(ruby_sd));
 
 	/* Disable autoclose feature */
@@ -1013,7 +1067,7 @@ pgconn_backend_pid(VALUE self)
 	return INT2NUM(PQbackendPID(pg_get_pgconn(self)));
 }
 
-#ifndef HAVE_PQSETCHUNKEDROWSMODE
+#ifndef LIBPQ_HAS_CHUNK_MODE
 typedef struct
 {
 	struct sockaddr_storage addr;
@@ -1588,7 +1642,7 @@ pgconn_sync_describe_portal(VALUE self, VALUE stmt_name)
 }
 
 
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 /*
  * call-seq:
  *    conn.sync_close_prepared( stmt_name ) -> PG::Result
@@ -1892,7 +1946,7 @@ pgconn_set_single_row_mode(VALUE self)
 	return self;
 }
 
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 /*
  * call-seq:
  *    conn.set_chunked_rows_mode -> self
@@ -2207,7 +2261,7 @@ pgconn_send_describe_portal(VALUE self, VALUE portal)
 		"PQsendDescribePortal");
 }
 
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 /*
  * call-seq:
  *    conn.send_close_prepared( statement_name ) -> nil
@@ -2333,7 +2387,7 @@ pgconn_sync_flush(VALUE self)
 	return (ret) ? Qfalse : Qtrue;
 }
 
-#ifndef HAVE_PQSETCHUNKEDROWSMODE
+#ifndef LIBPQ_HAS_CHUNK_MODE
 static VALUE
 pgconn_sync_cancel(VALUE self)
 {
@@ -3632,7 +3686,7 @@ pgconn_async_describe_prepared(VALUE self, VALUE stmt_name)
 	return pgconn_async_describe_close_prepared_potral(self, stmt_name, pgconn_send_describe_prepared);
 }
 
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 /*
  * call-seq:
  *    conn.close_prepared( statement_name ) -> PG::Result
@@ -3754,7 +3808,7 @@ pgconn_ssl_attribute_names(VALUE self)
 
 
 
-#ifdef HAVE_PQENTERPIPELINEMODE
+#ifdef LIBPQ_HAS_PIPELINING
 /*
  * call-seq:
  *    conn.pipeline_status -> Integer
@@ -3847,7 +3901,7 @@ pgconn_sync_pipeline_sync(VALUE self)
 }
 
 
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 /*
  * call-seq:
  *    conn.send_pipeline_sync -> nil
@@ -4642,7 +4696,6 @@ pgconn_field_name_type_set(VALUE self, VALUE sym)
 	rb_check_frozen(self);
 	this->flags &= ~PG_RESULT_FIELD_NAMES_MASK;
 	if( sym == sym_symbol ) this->flags |= PG_RESULT_FIELD_NAMES_SYMBOL;
-	else if ( sym == sym_static_symbol ) this->flags |= PG_RESULT_FIELD_NAMES_STATIC_SYMBOL;
 	else if ( sym == sym_string );
 	else rb_raise(rb_eArgError, "invalid argument %+"PRIsVALUE, sym);
 
@@ -4664,8 +4717,6 @@ pgconn_field_name_type_get(VALUE self)
 
 	if( this->flags & PG_RESULT_FIELD_NAMES_SYMBOL ){
 		return sym_symbol;
-	} else if( this->flags & PG_RESULT_FIELD_NAMES_STATIC_SYMBOL ){
-		return sym_static_symbol;
 	} else {
 		return sym_string;
 	}
@@ -4685,7 +4736,6 @@ init_pg_connection(void)
 	sym_value = ID2SYM(rb_intern("value"));
 	sym_string = ID2SYM(rb_intern("string"));
 	sym_symbol = ID2SYM(rb_intern("symbol"));
-	sym_static_symbol = ID2SYM(rb_intern("static_symbol"));
 
 	rb_cPGconn = rb_define_class_under( rb_mPG, "Connection", rb_cObject );
 	/* Help rdoc to known the Constants module */
@@ -4716,6 +4766,7 @@ init_pg_connection(void)
 	rb_define_private_method(rb_cPGconn, "reset_start2", pgconn_reset_start2, 1);
 	rb_define_method(rb_cPGconn, "reset_poll", pgconn_reset_poll, 0);
 	rb_define_alias(rb_cPGconn, "close", "finish");
+	rb_define_private_method(rb_cPGconn, "pgconn_address", pgconn_pgconn_address, 0);
 
 	/******     PG::Connection INSTANCE METHODS: Connection Status     ******/
 	rb_define_method(rb_cPGconn, "db", pgconn_db, 0);
@@ -4733,12 +4784,15 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "transaction_status", pgconn_transaction_status, 0);
 	rb_define_method(rb_cPGconn, "parameter_status", pgconn_parameter_status, 1);
 	rb_define_method(rb_cPGconn, "protocol_version", pgconn_protocol_version, 0);
+#ifdef LIBPQ_HAS_FULL_PROTOCOL_VERSION
+	rb_define_method(rb_cPGconn, "full_protocol_version", pgconn_full_protocol_version, 0);
+#endif
 	rb_define_method(rb_cPGconn, "server_version", pgconn_server_version, 0);
 	rb_define_method(rb_cPGconn, "error_message", pgconn_error_message, 0);
 	rb_define_method(rb_cPGconn, "socket", pgconn_socket, 0);
 	rb_define_method(rb_cPGconn, "socket_io", pgconn_socket_io, 0);
 	rb_define_method(rb_cPGconn, "backend_pid", pgconn_backend_pid, 0);
-#ifndef HAVE_PQSETCHUNKEDROWSMODE
+#ifndef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "backend_key", pgconn_backend_key, 0);
 #endif
 	rb_define_method(rb_cPGconn, "connection_needs_password", pgconn_connection_needs_password, 0);
@@ -4752,7 +4806,7 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "sync_exec_prepared", pgconn_sync_exec_prepared, -1);
 	rb_define_method(rb_cPGconn, "sync_describe_prepared", pgconn_sync_describe_prepared, 1);
 	rb_define_method(rb_cPGconn, "sync_describe_portal", pgconn_sync_describe_portal, 1);
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "sync_close_prepared", pgconn_sync_close_prepared, 1);
 	rb_define_method(rb_cPGconn, "sync_close_portal", pgconn_sync_close_portal, 1);
 #endif
@@ -4763,7 +4817,7 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "exec_prepared", pgconn_async_exec_prepared, -1);
 	rb_define_method(rb_cPGconn, "describe_prepared", pgconn_async_describe_prepared, 1);
 	rb_define_method(rb_cPGconn, "describe_portal", pgconn_async_describe_portal, 1);
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "close_prepared", pgconn_async_close_prepared, 1);
 	rb_define_method(rb_cPGconn, "close_portal", pgconn_async_close_portal, 1);
 #endif
@@ -4775,7 +4829,7 @@ init_pg_connection(void)
 	rb_define_alias(rb_cPGconn, "async_exec_prepared", "exec_prepared");
 	rb_define_alias(rb_cPGconn, "async_describe_prepared", "describe_prepared");
 	rb_define_alias(rb_cPGconn, "async_describe_portal", "describe_portal");
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 	rb_define_alias(rb_cPGconn, "async_close_prepared", "close_prepared");
 	rb_define_alias(rb_cPGconn, "async_close_portal", "close_portal");
 #endif
@@ -4788,7 +4842,7 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "escape_bytea", pgconn_s_escape_bytea, 1);
 	rb_define_method(rb_cPGconn, "unescape_bytea", pgconn_s_unescape_bytea, 1);
 	rb_define_method(rb_cPGconn, "set_single_row_mode", pgconn_set_single_row_mode, 0);
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "set_chunked_rows_mode", pgconn_set_chunked_rows_mode, 1);
 #endif
 
@@ -4810,7 +4864,7 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "discard_results", pgconn_discard_results, 0);
 
 	/******     PG::Connection INSTANCE METHODS: Cancelling Queries in Progress     ******/
-#ifndef HAVE_PQSETCHUNKEDROWSMODE
+#ifndef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "sync_cancel", pgconn_sync_cancel, 0);
 #endif
 
@@ -4852,13 +4906,13 @@ init_pg_connection(void)
 	rb_define_method(rb_cPGconn, "ssl_attribute", pgconn_ssl_attribute, 1);
 	rb_define_method(rb_cPGconn, "ssl_attribute_names", pgconn_ssl_attribute_names, 0);
 
-#ifdef HAVE_PQENTERPIPELINEMODE
+#ifdef LIBPQ_HAS_PIPELINING
 	rb_define_method(rb_cPGconn, "pipeline_status", pgconn_pipeline_status, 0);
 	rb_define_method(rb_cPGconn, "enter_pipeline_mode", pgconn_enter_pipeline_mode, 0);
 	rb_define_method(rb_cPGconn, "exit_pipeline_mode", pgconn_exit_pipeline_mode, 0);
 	rb_define_method(rb_cPGconn, "sync_pipeline_sync", pgconn_sync_pipeline_sync, 0);
 	rb_define_method(rb_cPGconn, "send_flush_request", pgconn_send_flush_request, 0);
-#ifdef HAVE_PQSETCHUNKEDROWSMODE
+#ifdef LIBPQ_HAS_CHUNK_MODE
 	rb_define_method(rb_cPGconn, "send_pipeline_sync", pgconn_send_pipeline_sync, 0);
 #endif
 #endif

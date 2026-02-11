@@ -6,7 +6,7 @@
 #include "pg.h"
 
 
-#ifndef HAVE_PQSETCHUNKEDROWSMODE
+#ifndef LIBPQ_HAS_CHUNK_MODE
 PGresult *PQclosePrepared(PGconn *conn, const char *stmtName){return NULL;}
 PGresult *PQclosePortal(PGconn *conn, const char *portalName){return NULL;}
 int PQsendClosePrepared(PGconn *conn, const char *stmtName){return 0;}
@@ -16,8 +16,11 @@ int PQcancelBlocking(PGcancelConn *cancelConn){return 0;}
 int PQcancelStart(PGcancelConn *cancelConn){return 0;}
 PostgresPollingStatusType PQcancelPoll(PGcancelConn *cancelConn){return PGRES_POLLING_FAILED;}
 #endif
-#ifndef HAVE_PQENTERPIPELINEMODE
+#ifndef LIBPQ_HAS_PIPELINING
 int PQpipelineSync(PGconn *conn){return 0;}
+#endif
+#ifndef LIBPQ_HAS_PROMPT_OAUTH_DEVICE
+int auth_data_hook_proxy(PGauthData type, PGconn *conn, void *data){return 0;}
 #endif
 
 #ifdef ENABLE_GVL_UNLOCK

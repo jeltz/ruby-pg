@@ -194,6 +194,7 @@ module PG::TestingHelpers
 		attr_reader :port
 		attr_reader :conninfo
 		attr_reader :unix_socket
+		attr_reader :version
 
 		### Set up a PostgreSQL database instance for testing.
 		def initialize(name, port: 23456, postgresql_conf: '')
@@ -205,6 +206,7 @@ module PG::TestingHelpers
 			@pgdata = @test_dir + 'data'
 			@logfile = @test_dir + 'setup.log'
 			@pg_bindir = pg_bindir
+			@version = pg_version
 			@unix_socket = @test_dir.to_s
 			@conninfo = "host=localhost port=#{@port} dbname=test sslrootcert=#{@pgdata + 'ruby-pg-ca-cert'} sslcert=#{@pgdata + 'ruby-pg-client-cert'} sslkey=#{@pgdata + 'ruby-pg-client-key'}"
 
@@ -227,7 +229,7 @@ module PG::TestingHelpers
 		def create_test_db
 			trace "Creating the test DB"
 			log_and_run @logfile, pg_bin_path('psql'), '-p', @port.to_s, '-e', '-c', 'DROP DATABASE IF EXISTS test', 'postgres'
-			log_and_run @logfile, pg_bin_path('createdb'), '-p', @port.to_s, '-e', 'test'
+			log_and_run @logfile, pg_bin_path('createdb'), '-p', @port.to_s, 'test'
 		end
 
 		def connect
@@ -267,8 +269,13 @@ module PG::TestingHelpers
 					ssl_cert_file = 'ruby-pg-server-cert'
 					ssl_key_file = 'ruby-pg-server-key'
 					fsync = off
-					#{postgresql_conf}
 				EOT
+				if @version >= 18
+					fd.puts <<~EOT
+						oauth_validator_libraries = '#{TEST_DIRECTORY}/spec/oauth/dummy_validator'
+					EOT
+				end
+				fd.puts postgresql_conf
 			end
 
 			# Enable MD5 authentication in hba config
@@ -278,6 +285,12 @@ module PG::TestingHelpers
 					# TYPE  DATABASE     USER              ADDRESS             METHOD
 					host    all          testusermd5       ::1/128             md5
 				EOT
+				if @version >= 18
+					fd.puts <<~EOT
+						host    all          testuseroauth     127.0.0.1/32        oauth scope=test issuer="http://localhost:#{@port + 3}"
+						host    all          testuseroauth     ::1/32              oauth scope=test issuer="http://localhost:#{@port + 3}"
+					EOT
+				end
 				fd.puts hba_content
 			end
 
@@ -340,6 +353,10 @@ module PG::TestingHelpers
 		rescue
 			nil
 		end
+
+		def pg_version
+			`#{pg_bin_path("pg_ctl")} --version`[/pg_ctl \(PostgreSQL\) (\d+)/, 1]&.to_i
+		end
 	end
 
 	class CertGenerator
@@ -355,7 +372,6 @@ module PG::TestingHelpers
 		end
 
 		def create_ca_cert(name, ca_key, x509_name, valid_years: 10)
-			ca_key = OpenSSL::PKey::RSA.new File.read "#{ca_key}" unless ca_key.kind_of?(OpenSSL::PKey::RSA)
 			ca_name = OpenSSL::X509::Name.parse x509_name
 
 			ca_cert = OpenSSL::X509::Certificate.new
@@ -396,7 +412,6 @@ module PG::TestingHelpers
 		end
 
 		def create_signing_request(name, x509_name, key)
-			key = OpenSSL::PKey::RSA.new File.read "#{key}" unless key.kind_of?(OpenSSL::PKey::RSA)
 			csr = OpenSSL::X509::Request.new
 			csr.version = 0
 			csr.subject = OpenSSL::X509::Name.parse x509_name
@@ -411,9 +426,6 @@ module PG::TestingHelpers
 		end
 
 		def create_cert_from_csr(name, csr, ca_cert, ca_key, valid_years: 10, dns_names: nil)
-			ca_key = OpenSSL::PKey::RSA.new File.read "#{ca_key}" unless ca_key.kind_of?(OpenSSL::PKey::RSA)
-			ca_cert = OpenSSL::X509::Certificate.new File.read "#{ca_cert}" unless ca_cert.kind_of?(OpenSSL::X509::Certificate)
-			csr = OpenSSL::X509::Request.new File.read "#{csr}" unless csr.kind_of?(OpenSSL::X509::Request)
 			raise 'CSR can not be verified' unless csr.verify csr.public_key
 
 			csr_cert = OpenSSL::X509::Certificate.new
@@ -682,6 +694,7 @@ RSpec.configure do |config|
 	config.filter_run_excluding( :postgresql_12 ) if PG.library_version < 120000
 	config.filter_run_excluding( :postgresql_14 ) if PG.library_version < 140000
 	config.filter_run_excluding( :postgresql_17 ) if PG.library_version < 170000
+	config.filter_run_excluding( :postgresql_18 ) if PG.library_version < 180000
 	config.filter_run_excluding( :unix_socket ) if RUBY_PLATFORM=~/mingw|mswin/i
 	config.filter_run_excluding( :scheduler ) if RUBY_VERSION < "3.0" || (RUBY_PLATFORM =~ /mingw|mswin/ && RUBY_VERSION < "3.1") || !Fiber.respond_to?(:scheduler)
 	config.filter_run_excluding( :scheduler_address_resolve ) if RUBY_VERSION < "3.1"

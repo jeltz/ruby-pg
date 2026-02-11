@@ -116,7 +116,7 @@ typedef struct {
 	/* Ruby encoding index of the client/internal encoding */
 	int enc_idx : PG_ENC_IDX_BITS;
 	/* flags controlling Symbol/String field names */
-	unsigned int flags : 2;
+	unsigned int flags : 1;
 	/* enable automatic flushing of send data at the end of send_query calls */
 	unsigned int flush_data : 1;
 
@@ -151,7 +151,7 @@ typedef struct {
 	unsigned int autoclear : 1;
 
 	/* flags controlling Symbol/String field names */
-	unsigned int flags : 2;
+	unsigned int flags : 1;
 
 	/* Number of fields in fnames[] .
 	 * Set to -1 if fnames[] is not yet initialized.
@@ -181,9 +181,8 @@ typedef VALUE (* t_pg_typecast_result)(t_typemap *, VALUE, int, int);
 typedef t_pg_coder *(* t_pg_typecast_query_param)(t_typemap *, VALUE, int);
 typedef VALUE (* t_pg_typecast_copy_get)( t_typemap *, VALUE, int, int, int );
 
-#define PG_RESULT_FIELD_NAMES_MASK 0x03
+#define PG_RESULT_FIELD_NAMES_MASK 0x01
 #define PG_RESULT_FIELD_NAMES_SYMBOL 0x01
-#define PG_RESULT_FIELD_NAMES_STATIC_SYMBOL 0x02
 
 #define PG_CODER_TIMESTAMP_DB_UTC 0x0
 #define PG_CODER_TIMESTAMP_DB_LOCAL 0x1
@@ -289,6 +288,7 @@ extern VALUE pg_typemap_all_strings;
 void Init_pg_ext                                       _(( void ));
 
 void init_pg_connection                                _(( void ));
+void init_pg_auth_hooks                                _(( void ));
 void init_pg_result                                    _(( void ));
 void init_pg_errors                                    _(( void ));
 void init_pg_type_map                                  _(( void ));
@@ -375,6 +375,9 @@ rb_encoding * pg_get_pg_encname_as_rb_encoding         _(( const char * ));
 const char * pg_get_rb_encoding_as_pg_encoding         _(( rb_encoding * ));
 rb_encoding *pg_conn_enc_get                           _(( PGconn * ));
 
+#ifdef LIBPQ_HAS_PROMPT_OAUTH_DEVICE
+int auth_data_hook_proxy(PGauthData type, PGconn *conn, void *data);
+#endif
 void notice_receiver_proxy(void *arg, const PGresult *result);
 void notice_processor_proxy(void *arg, const char *message);
 
